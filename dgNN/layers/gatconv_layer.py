@@ -21,7 +21,7 @@ class GATConv(nn.Module): # our gat layer
         self.out_feats=out_feats
         self.num_heads=num_heads
         self.W = nn.Parameter(torch.FloatTensor(in_feats, out_feats * num_heads))
-        self.attn_l = nn.Parameter(torch.FloatTensor(size=(1, num_heads, out_feats)))
+        self.attn_l = nn.Parameter(torch.FloatTensor(size=(1, num_heads, out_feats))) # 随机初始值
         self.attn_r = nn.Parameter(torch.FloatTensor(size=(1, num_heads, out_feats)))
         self.negative_slope=negative_slope
         self.attn_drop=attn_drop
@@ -77,6 +77,7 @@ class GATConv(nn.Module): # our gat layer
         if not self.training:
             rst=GATConvFuse_inference(attn_row,attn_col,row_ptr,col_ind,self.negative_slope,h)
         else:
+            # fused_gat.gat_forward(attn_row,attn_col,row_ptr,col_ind,negative_slope,in_feat,attn_drop)
             rst=GATConvFuse(attn_row,attn_col,row_ptr,col_ind,col_ptr,row_ind,permute,self.negative_slope,h,self.attn_drop)
         
         if self.res_fc is not None:

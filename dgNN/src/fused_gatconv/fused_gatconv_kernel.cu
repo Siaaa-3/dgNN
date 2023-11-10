@@ -30,39 +30,45 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
                                      float *edge_mask, float *out_feat,
                                      unsigned long long seed) {
   int rid = blockIdx.x;
-  int hid = blockIdx.y;
+  int hid = blockIdx.y; 
   int lb = row_ptr[rid];
   int hb = row_ptr[rid + 1];
-  int ptr = lb + threadIdx.x;
-  int loop = (hb - lb + 31) / 32;
+  int ptr = lb + threadIdx.x; // 第几个线程
+  int loop = (hb - lb + 31) / 32; // 当前线程处理几个feature
   extern __shared__ float val_sh[];
   float *attn_val_sh = val_sh;
   int *cid_sh = (int *)&val_sh[32];
 
-  float attn_row_val = attn_row[rid * h + hid];
+  // 获取注意力权重
+  // attn_row维度：(N, n_heads)
+  float attn_row_val = attn_row[rid * h + hid]; 
   // float attn_row_val=0;
 
+  // 更新权重 
   float weightMax = -1e38;
   // // computing weightMax
   for (int j = 0; j < loop; j++) {
-    int pid = ptr + (j << 5);
+    int pid = ptr + (j << 5); // ptr代表第几个线程（每个block有32个线程），pid代表（当前线程）处理的第几个feature
     float weight = -1e38;
     if (pid < hb) {
-      int cid = col_ind[pid];
-      float attn_col_val = attn_col[cid * h + hid];
-      weight = attn_row_val + attn_col_val;
-      weight = LeakyRelu(weight, negative_slope);
+      int cid = col_ind[pid]; //列索引，pid在图中对应第几个feature的位置，col_ind[pid]则找到对应节点的列索引
+      float attn_col_val = attn_col[cid * h + hid]; // attn_col_val即对应邻居节点的注意力权重
+      weight = attn_row_val + attn_col_val; 
+      weight = LeakyRelu(weight, negative_slope); 
     }
     __syncwarp();
+    // 找权重最大值。 循环中，stride = 16 8 4 2 1
     for (int stride = 16; stride > 0; stride >>= 1) {
-      float tmp = __shfl_xor_sync(0xffffffff, weight, stride, 32);
+      float tmp = __shfl_xor_sync(0xffffffff, weight, stride, 32); // 将一个线程的数据发送给同一个线程块中的其他线程，然后将接收到的数据与本地数据进行按位异或（XOR）操作
       weight = MAX(tmp, weight);
     }
     weightMax = MAX(weight, weightMax);
   }
+  // 线程块中的第一个线程将最大权重值 weightMax 存储在 edge_max 数组中的相应位置。
   if (threadIdx.x == 0)
     edge_max[rid * h + hid] = weightMax;
 
+  // 计算softmax中的分子e^{x_i - max(x)}
   float expAll = 0;
   for (int j = 0; j < loop; j++) {
     int pid = ptr + (j << 5);
@@ -72,9 +78,10 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
       float attn_col_val = attn_col[cid * h + hid];
       float weight = attn_row_val + attn_col_val;
       weight = LeakyRelu(weight, negative_slope);
-      exptmp = exp(weight - weightMax);
+      exptmp = exp(weight - weightMax); // 使用第一个循环计算出的最大权重值 weightMax 来稳定每个权重的指数计算
     }
     __syncwarp();
+    // 计算softmax中的分母 \sum_j e^{x_j - \max(x)}，即得到 expAll
     for (int stride = 16; stride > 0; stride >>= 1) {
       float tmp = __shfl_xor_sync(0xffffffff, exptmp, stride, 32);
       exptmp += tmp;
@@ -84,6 +91,7 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
   if (threadIdx.x == 0)
     edge_sum[rid * h + hid] = expAll;
 
+  // 处理特征向量
   int fid = threadIdx.y * 32 + threadIdx.x;
   // for (int fid = threadIdx.x; fid < (f + 31) / 32 * 32; fid += 32)
   {
@@ -95,25 +103,25 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
       if (pid < hb && edge_mask[pid * h + hid] > attn_drop)
       // if (pid < hb)
       {
-        cid = col_ind[pid];
+        cid = col_ind[pid]; // col_ind是列索引
         float attn_col_val = attn_col[cid * h + hid];
         weight = attn_row_val + attn_col_val;
         weight = LeakyRelu(weight, negative_slope);
         weight = exp(weight - weightMax) / expAll;
       }
-      attn_val_sh[threadIdx.x] = weight / (1.0 - attn_drop);
+      attn_val_sh[threadIdx.x] = weight / (1.0 - attn_drop); // 缩放激活输出，实质上是在保持网络的输出权重不变。
       cid_sh[threadIdx.x] = cid;
       __syncwarp();
-      int jj = lb + (j << 5);
-      for (int kk = 0; kk < 32 && jj + kk < hb; kk++) {
-        int cid = cid_sh[kk];
-        float val = attn_val_sh[kk];
-        acc += val * in_feat[cid * h * f + hid * f + fid];
+      int jj = lb + (j << 5); // jj代表第几轮feature
+      for (int kk = 0; kk < 32 && jj + kk < hb; kk++) { // kk代表第几个线程
+        int cid = cid_sh[kk]; // 取出对应列索引 cid
+        float val = attn_val_sh[kk]; // 对应注意力权重
+        acc += val * in_feat[cid * h * f + hid * f + fid]; // 将in_feat乘以注意力权重
       }
       __syncwarp();
     }
     if (fid < f)
-      out_feat[rid * h * f + hid * f + fid] = acc;
+      out_feat[rid * h * f + hid * f + fid] = acc; // 该节点经过一次前向传播计算后的新特征表示
   }
 }
 
@@ -364,10 +372,10 @@ std::vector<torch::Tensor>
 gat_forward_cuda(torch::Tensor attn_row, torch::Tensor attn_col,
                  torch::Tensor row_ptr, torch::Tensor col_ind,
                  float negative_slope, torch::Tensor in_feat, float attn_drop) {
-  const auto m = row_ptr.size(0) - 1;
+  const auto m = row_ptr.size(0) - 1; // 行数，也即节点个数
   const auto nnz = col_ind.size(0);
-  const auto h = attn_row.size(1);
-  const auto f = in_feat.size(2);
+  const auto h = attn_row.size(1); // num_heads，头数
+  const auto f = in_feat.size(2); // out_feats，输出特征个数
   auto devid = attn_row.device().index();
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, devid);

@@ -76,13 +76,13 @@ def load_dataset(args):
     g = dgl.add_self_loop(g)
     
     col,row=g.edges(order='srcdst')
-    edge_idx=torch.stack((col,row))
+    edge_idx=torch.stack((col,row)) # 一个矩阵，包含图中所有边的源节点和目标节点索引？
     numlist = torch.arange(col.size(0), dtype=torch.int32)
 
     adj_csr = sp.csr_matrix((numlist.numpy(), (row, col)), shape=(g.num_nodes(), g.num_nodes()))
     
-    row_ptr=torch.from_numpy(adj_csr.indptr)
-    col_ind=torch.from_numpy(adj_csr.indices)
+    row_ptr=torch.from_numpy(adj_csr.indptr) # 向量长度为节点数+1
+    col_ind=torch.from_numpy(adj_csr.indices) # 该向量长度等于图中边的数量
 
     adj_csc=adj_csr.tocsc()
 
@@ -93,7 +93,7 @@ def load_dataset(args):
     adj_csc_new=adj_csr_new.tocsc()
     permute=torch.from_numpy(adj_csc_new.data)
     print(permute)
-    features=g.ndata['feat']
+    features=g.ndata['feat'] # 每行表示一个节点的特征向量。维度为(g.num_nodes(), n_feats)
     labels=g.ndata['label']
     n_feats=features.shape[1]
     n_classes=data.num_labels
