@@ -34,7 +34,7 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
   int lb = row_ptr[rid];
   int hb = row_ptr[rid + 1];
   int ptr = lb + threadIdx.x; // 第几个线程
-  int loop = (hb - lb + 31) / 32; // 当前线程处理几个feature
+  int loop = (hb - lb + 31) / 32; // 当前线程处理几个feature(几个warp)
   extern __shared__ float val_sh[];
   float *attn_val_sh = val_sh;
   int *cid_sh = (int *)&val_sh[32];
@@ -96,7 +96,7 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
   // for (int fid = threadIdx.x; fid < (f + 31) / 32 * 32; fid += 32)
   {
     float acc = 0;
-    for (int j = 0; j < loop; j++) {
+    for (int j = 0; j < loop; j++) { // 第j个warp（第j个feature）
       int pid = ptr + (j << 5);
       float weight = 0;
       int cid = 0;
@@ -112,8 +112,8 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
       attn_val_sh[threadIdx.x] = weight / (1.0 - attn_drop); // 缩放激活输出，实质上是在保持网络的输出权重不变。
       cid_sh[threadIdx.x] = cid;
       __syncwarp();
-      int jj = lb + (j << 5); // jj代表第几轮feature
-      for (int kk = 0; kk < 32 && jj + kk < hb; kk++) { // kk代表第几个线程
+      int jj = lb + (j << 5); // jj代表第j轮feature（第j个warp）的开始元素的行偏移
+      for (int kk = 0; kk < 32 && jj + kk < hb; kk++) { // kk代表当前warp内第几个线程
         int cid = cid_sh[kk]; // 取出对应列索引 cid
         float val = attn_val_sh[kk]; // 对应注意力权重
         acc += val * in_feat[cid * h * f + hid * f + fid]; // 将in_feat乘以注意力权重
