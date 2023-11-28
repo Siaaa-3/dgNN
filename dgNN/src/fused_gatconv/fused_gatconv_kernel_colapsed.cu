@@ -33,18 +33,21 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
   int hid = blockIdx.y; 
   int lb = row_ptr[rid];
   int hb = row_ptr[rid + 1];
-  int ptr = lb + threadIdx.x; // 第几个线程
+  int ptr = lb + threadIdx.x; // 第几个线程（类似lane id）
   int loop = (hb - lb + 31) / 32; // 当前线程处理几个feature(几个warp)
   extern __shared__ float val_sh[];
   float *attn_val_sh = val_sh;
   int *cid_sh = (int *)&val_sh[32];
 
-  // 获取注意力权重
+  int lid = rid & (WF_SIZE - 1);
+  int wid = rid / WF_SIZE;
+  __shared__ T shared_val[blockDim * 32];
+
+
   // attn_row维度：(N, n_heads)
   float attn_row_val = attn_row[rid * h + hid]; 
   // float attn_row_val=0;
 
-  // 更新权重 
   float weightMax = -1e38;
   // // computing weightMax
   for (int j = 0; j < loop; j++) {
@@ -96,32 +99,54 @@ __global__ void fused_forward_kernel(int m, int nnz, int h, int f,
   // for (int fid = threadIdx.x; fid < (f + 31) / 32 * 32; fid += 32)
   {
     float acc = 0;
-    for (int j = 0; j < loop; j++) { // 第j个warp（第j个feature）
+    for (int j = 0; j < loop; j++) { 
       int pid = ptr + (j << 5);
       float weight = 0;
       int cid = 0;
       if (pid < hb && edge_mask[pid * h + hid] > attn_drop)
       // if (pid < hb)
       {
-        cid = col_ind[pid]; // col_ind是列索引
+        cid = col_ind[pid]; 
         float attn_col_val = attn_col[cid * h + hid];
         weight = attn_row_val + attn_col_val;
         weight = LeakyRelu(weight, negative_slope);
         weight = exp(weight - weightMax) / expAll;
+
+        weight = weight / (1.0 - attn_drop);
+
       }
-      attn_val_sh[threadIdx.x] = weight / (1.0 - attn_drop); // 缩放激活输出，实质上是在保持网络的输出权重不变。
-      cid_sh[threadIdx.x] = cid;
+    //   attn_val_sh[threadIdx.x] = weight / (1.0 - attn_drop); 
+    //   cid_sh[threadIdx.x] = cid;
       __syncwarp();
-      int jj = lb + (j << 5); // jj代表第j轮feature（第j个warp）的开始元素的行偏移
-      for (int kk = 0; kk < 32 && jj + kk < hb; kk++) { // kk代表当前warp内第几个线程
-        int cid = cid_sh[kk];
-        float val = attn_val_sh[kk];
-        acc += val * in_feat[cid * h * f + hid * f + fid]; // 将in_feat乘以注意力权重
+      int jj = lb + (j << 5); 
+      float valB[32];
+      for (int kk = 0; kk < 32 && jj + kk < hb; kk++) { 
+    //     int cid = cid_sh[kk];
+    //     float val = attn_val_sh[kk];
+    //     acc += val * in_feat[cid * h * f + hid * f + fid]; 
+        
+        float val = __shfl(weight, kk, 32);
+        int cid = __shfl(cid, kk, 32);
+
+        valB[kk] = val * in_feat[cid * h * f + hid * f + fid];
       }
-      __syncwarp();
+
+      for (int kk = 0; kk < 32 && jj + kk < hb; kk++) { 
+        shared_val[blockDim * lid + 32 * wid + kk] = valB[i];
+      }
+      __syncthreads();
+      for(int kk = 0; kk < WF_SIZE; ++kk)
+      {
+          valB[kk] = shared_val[blockDim * kk + tid];
+      }
+
+      for (int kk = 0; kk < 32 && jj + kk < hb; kk++){
+        acc += valB[i];
+      }
+      
     }
     if (fid < f)
-      out_feat[rid * h * f + hid * f + fid] = acc; // 该节点经过一次前向传播计算后的新特征表示
+      out_feat[rid * h * f + hid * f + fid] = acc; 
   }
 }
 
